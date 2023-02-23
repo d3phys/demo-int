@@ -4,6 +4,7 @@
 #include <vector>
 #include <stack>
 #include <iostream>
+#include <assert.h>
 
 namespace trace {
 
@@ -47,14 +48,16 @@ class Node
         Count
     };
 
-    Node( const std::string& identifier, Value_t value_type)
+    Node( std::size_t index, const std::string& identifier, Value_t value_type)
       : value_type{ value_type}
       , identifier{ identifier}
+      , index{ index}
     {}
 
   public:
     Value_t value_type;
     std::string identifier;
+    std::size_t index;
 };
 
 class Edge
@@ -97,14 +100,6 @@ struct Subgraph
       : identifier{ identifier} {}
 };
 
-class PrintTable
-{
-  public:
-    Subgraph::Printer_t subgraph_printer{};
-    Node::Printer_t node_printers[Node::Value_t::Count] {0};
-    Edge::Printer_t edge_printers[Edge::Pass_t::Count]  {0};
-};
-
 class Graph
 {
   private:
@@ -113,12 +108,18 @@ class Graph
     std::vector<Subgraph> subgraphs_;
 
     std::stack<std::size_t> call_stack_;
-    Subgraph subgraph_;
 
   public:
     Graph()
     {
-        subgraphs_.emplace_back( "");
+        subgraphs_.emplace_back( "G");
+        call_stack_.push( 0);
+    }
+
+    ~Graph()
+    {
+        call_stack_.pop();
+        assert( call_stack_.empty());
     }
 
           Node& getNode()                         { return nodes_.back(); }
@@ -128,24 +129,34 @@ class Graph
     Edge& getEdge()                   { return edges_.back(); }
     Edge& getEdge( std::size_t index) { return edges_.at( index); }
 
-    std::size_t createSubgraph( const std::string& identifier, std::size_t parent = 0)
+    void enterCall( const std::string& identifier)
+    {
+        call_stack_.push( createSubgraph( identifier));
+    }
+
+    void leaveCall()
+    {
+        call_stack_.pop();
+    }
+
+    std::size_t createSubgraph( const std::string& identifier)
     {
         subgraphs_.emplace_back( identifier);
-        subgraphs_.at( parent).child_subgraphs.emplace_back( subgraphs_.size() - 1);
+        subgraphs_.at( call_stack_.top()).child_subgraphs.emplace_back( subgraphs_.size() - 1);
         return subgraphs_.size() - 1;
     }
 
     std::size_t createNode( Node::Value_t value_type, const std::string& identifier = "")
     {
+        std::size_t node_index = nodes_.size();
         if ( identifier == "" )
         {
-            nodes_.emplace_back( "tmp#" + std::to_string( nodes_.size()), value_type);
+            nodes_.emplace_back( node_index, "tmp#" + std::to_string( nodes_.size()), value_type);
         } else
         {
-            nodes_.emplace_back( identifier, value_type);
+            nodes_.emplace_back( node_index, identifier, value_type);
         }
 
-        std::size_t node_index = nodes_.size() - 1;
         subgraphs_.at(call_stack_.top()).nodes.push_back( node_index);
         return node_index;
     }
@@ -158,32 +169,28 @@ class Graph
 
     void dump( FILE* stream) const
     {
-        dumpSubgraph( stream, subgraph_);
-
-        for ( auto it = edges_.begin(); it != edges_.end(); it++ )
-        {
-            dumpEdge( stream, *it);
-        }
+        dumpGraph( stream, 0);
     }
 
   private:
 
-    void dumpNode( FILE* stream, const Node& node) const
+    void dumpNode( FILE* stream, std::size_t index) const
     {
-        std::fprintf( stream, "\"%s\"", node.identifier.c_str());
+        const Node& node = nodes_.at( index);
+        std::fprintf( stream, "\"%%%ld\"[label=\"%s\", ", index, node.identifier.c_str());
         switch ( node.value_type )
         {
           case Node::Value_t::Temporary:
-            std::fprintf( stream, "\n");
+            std::fprintf( stream, "color = \"red\"]\n");
             break;
           case Node::Value_t::LValue:
-            std::fprintf( stream, "\n");
+            std::fprintf( stream, "color = \"grey\"]\n");
             break;
           case Node::Value_t::LVRef:
-            std::fprintf( stream, "\n");
+            std::fprintf( stream, "color = \"grey\", style = \"dashed\"]\n");
             break;
           case Node::Value_t::RVRef:
-            std::fprintf( stream, "\n");
+            std::fprintf( stream, "color = \"grey\", style = \"dashed\"]\n");
             break;
           default:
             break;
@@ -192,50 +199,94 @@ class Graph
 
     void dumpEdge( FILE* stream, const Edge& edge) const
     {
-        std::fprintf( stream, "\"%s\"->\"%s\"",
-                      getNode( edge.neighbours.first).identifier.c_str(),
-                      getNode( edge.neighbours.second).identifier.c_str());
+        std::fprintf( stream, "\"%%%ld\"->\"%%%ld\"", edge.neighbours.first, edge.neighbours.second);
 
         switch ( edge.pass_type )
         {
           case Edge::Pass_t::LVRef:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[style=\"dashed\", label=\" &\"]\n");
             break;
           case Edge::Pass_t::ConstLVRef:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[style=\"dashed\", label=\" const &\"]\n");
             break;
           case Edge::Pass_t::RVRef:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[style=\"dashed\", label=\" &&\"]\n");
             break;
           case Edge::Pass_t::ConstRVRef:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[style=\"dashed\", label=\" const &&\"]\n");
             break;
           case Edge::Pass_t::Copy:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[label=\" copy\", color=\"red\"]\n");
             break;
           case Edge::Pass_t::Move:
-            std::fprintf( stream, "");
+            std::fprintf( stream, "[label=\" move\", color=\"green\"]\n");
             break;
           default:
             break;
         }
     }
 
-    void dumpSubgraph( FILE* stream, const Subgraph& subgraph) const
+    void dumpContent( FILE* stream, const Subgraph& subgraph) const
     {
-        std::fprintf( stream, "subgraph \"%s\" {\n", subgraph.identifier.c_str());
         for ( auto it = subgraph.nodes.begin(); it != subgraph.nodes.end(); it++ )
         {
-            dumpNode( stream, nodes_.at(*it));
+            dumpNode( stream, *it);
         }
 
         for ( auto it = subgraph.child_subgraphs.begin(); it != subgraph.child_subgraphs.end(); it++ )
         {
-            dumpSubgraph( stream, subgraphs_.at(*it));
+            dumpSubgraph( stream, *it);
+        }
+    }
+
+    void dumpSubgraph( FILE* stream, std::size_t subgraph_index) const
+    {
+        const Subgraph& subgraph = subgraphs_.at( subgraph_index);
+
+        std::fprintf( stream, "subgraph cluster_%ld {\n", subgraph_index);
+        std::fprintf( stream, "style = \"rounded\"\nlabel=\"%s\"\n", subgraph.identifier.c_str());
+        dumpContent( stream, subgraph);
+        std::fprintf( stream, "}\n");
+    }
+
+    void dumpGraph( FILE* stream, std::size_t graph_index) const
+    {
+        const Subgraph& subgraph = subgraphs_.at( graph_index);
+        std::fprintf( stream, "digraph \"%s\" {\n", subgraph.identifier.c_str());
+
+        std::fprintf( stream, "fontname=\"Courier New\"\n"
+                              "edge [fontname=\"Courier New\"]\n");
+        std::fprintf( stream, R"(
+node [penwidth = 2, shape = box, fillcolor = white,
+      style = "rounded, filled", fontname = "Courier"]
+        )" "\n");
+
+        dumpContent( stream, subgraph);
+        for ( auto it = edges_.begin(); it != edges_.end(); it++ )
+        {
+            dumpEdge( stream, *it);
         }
 
         std::fprintf( stream, "}\n");
     }
+};
+
+class Scope
+{
+  public:
+    Scope( Graph& graph, const std::string& identifier)
+      : graph_{ graph}
+    {
+        graph_.enterCall( identifier);
+    }
+
+    ~Scope()
+    {
+        graph_.leaveCall();
+    }
+
+  private:
+    Graph& graph_;
 };
 
 template <typename T>
@@ -250,7 +301,12 @@ class Proxy
     Proxy( Proxy&& other);
     Proxy& operator=( Proxy&& other);
 
+    Proxy& operator+( const Proxy& other);
+
     ~Proxy() = default;
+
+    std::size_t getNodeIndex() const { return node_index_; };
+    const T& getValue() const { return value_; }
 
     static Graph gGraph;
 
@@ -266,9 +322,7 @@ Proxy<T>::Proxy( const T& value)
 {}
 
 template <typename T>
-Proxy<T>::Proxy( const Proxy& other)
-  : value_{ other.value_},
-    node_index_{ gGraph.createNode( Node::Value_t::Temporary)}
+Proxy<T>::Proxy( const Proxy& other) : value_{ other.value_}, node_index_{ gGraph.createNode( Node::Value_t::Temporary)}
 {
     gGraph.createEdge( other.node_index_, node_index_, Edge::Pass_t::Copy);
 }
@@ -323,10 +377,35 @@ Movement( Int&& var)
     Int c = var;
 }
 
+#define dfg_val( __v, __type)                                     \
+    do { Int::gGraph.getNode().identifier = #__v;                 \
+         Int::gGraph.getNode().value_type = dfg::Node::Value_t::__type; } while ( 0 )
 
-#define dfg_v( __v) Int::gGraph.getNode().identifier = #__v;
-#define dfg_p( __v, __type) Int::gGraph.createNode( __type, #__v);
+#define dfg_arg( __v, __val_type, __type)                                                       \
+    do { Int::gGraph.createEdge( __v.getNodeIndex(),                                            \
+                                 Int::gGraph.createNode( dfg::Node::Value_t::__val_type, #__v), \
+                                 dfg::Edge::Pass_t::__type); } while ( 0 )
+
 #define dfg_e( __v) Int::gGraph.getNode().identifier = #__v;
+#define dfg_scope() dfg::Scope super_unique_scope{ Int::gGraph, __func__}
+
+
+Int Func( Int& param)
+{
+    dfg_scope();
+    dfg_arg( param, LVRef, ConstLVRef);
+
+    return Int{ 3};
+}
+
+Int Add( const Int& rhs, const Int& lhs)
+{
+    dfg_scope();
+    dfg_arg( rhs, LVRef, ConstLVRef);
+    dfg_arg( lhs, LVRef, ConstLVRef);
+
+    return rhs.getValue() + lhs.getValue();
+}
 
 int
 main()
@@ -340,12 +419,12 @@ main()
 
    // Int copy_elision = func(); dfg_var( copy_elision);
 
-    Int a{ 0}; dfg_v( a);
-    Int b = a; dfg_v( b);
-    Int c{ 0}; dfg_v( c);
-    Int d{ 0}; dfg_v( d);
-
-    dfg_p( arr, dfg::Node::Value_t::LValue);
+    {
+        dfg_scope();
+        Int a{ 0}; dfg_val( a, LValue);
+        a = Func( a);
+        Int b = Add( a, 3); dfg_val( b, LValue);
+    }
 
     Int::gGraph.dump( stdout);
     return 0;
